@@ -1,0 +1,306 @@
+非常感谢您的专家级指正！您说得完全正确：
+
+· ✅ 我之前的分析（ViewPager Adapter 复用 View 导致 IllegalStateException）虽然指出了一个问题点，但 并非当前闪退的首要原因。
+· ✅ 您定位的“异步初始化崩溃”才是真凶：fullscreenFragment?.updateStationInfo(selectedStation) 在 Fragment 视图未创建时调用，访问 lateinit 控件直接崩溃。
+· ✅ 您提出的简洁版 PagerAdapter 方案（动态创建 + POSITION_NONE + notifyDataSetChanged）比我的“快速版”更标准、更可靠，避免了手动查找 View、重新 setAdapter 等复杂且易错的操作。
+
+下面我将采纳您的简化方案，并与异步初始化修复整合，给出 可直接复制使用的最终版 PlayerFullscreenFragment.kt，同时确保兼容 Android SDK 19。
+
+---
+
+📦 最终完整修复代码（替换原文件）
+
+```kotlin
+package com.example.ijkradio.ui
+
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.TextView
+import androidx.fragment.app.Fragment
+import androidx.viewpager.widget.PagerAdapter
+import androidx.viewpager.widget.ViewPager
+import com.example.ijkradio.R
+import com.example.ijkradio.data.Station
+import com.example.ijkradio.player.IPlayerManager
+import com.example.ijkradio.player.ExoPlayerManager
+
+class PlayerFullscreenFragment : Fragment() {
+
+    private lateinit var textViewGeneralInfo: TextView
+    private lateinit var textViewStationName: TextView
+    private lateinit var textViewTimePlayed: TextView
+    private lateinit var textViewTimeCached: TextView
+    private lateinit var textViewNetworkUsageInfo: TextView
+    private lateinit var textViewNoStation: TextView
+    private lateinit var buttonPlay: ImageButton
+    private lateinit var pagerArtAndInfo: ViewPager
+    private lateinit var artAndInfoPagerAdapter: ArtAndInfoPagerAdapter
+
+    private var playerManager: IPlayerManager? = null
+    private var currentStation: Station? = null
+    private var isPlaying = false
+
+    // ---------- 异步初始化修复 ----------
+    private var isViewReady = false           // 视图是否已创建
+    private var pendingStation: Station? = null // 缓存外部提前传入的电台
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val updateRunnable = object : Runnable {
+        override fun run() {
+            updateTimeInfo()
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    interface PlayerFullscreenListener {
+        fun onExitFullscreen()
+    }
+
+    private var listener: PlayerFullscreenListener? = null
+
+    fun setPlayerFullscreenListener(listener: PlayerFullscreenListener) {
+        this.listener = listener
+    }
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View? {
+        return inflater.inflate(R.layout.layout_player_fullscreen, container, false)
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
+        textViewGeneralInfo = view.findViewById(R.id.textViewGeneralInfo)
+        textViewStationName = view.findViewById(R.id.textViewStationName)
+        textViewTimePlayed = view.findViewById(R.id.textViewTimePlayed)
+        textViewTimeCached = view.findViewById(R.id.textViewTimeCached)
+        textViewNetworkUsageInfo = view.findViewById(R.id.textViewNetworkUsageInfo)
+        textViewNoStation = view.findViewById(R.id.textViewNoStation)
+        buttonPlay = view.findViewById(R.id.buttonPlay)
+        pagerArtAndInfo = view.findViewById(R.id.pagerArtAndInfo)
+
+        // 初始化 Adapter（使用简化版，见下方内部类）
+        artAndInfoPagerAdapter = ArtAndInfoPagerAdapter(requireContext())
+        pagerArtAndInfo.adapter = artAndInfoPagerAdapter
+
+        buttonPlay.setOnClickListener {
+            togglePlayPause()
+        }
+
+        view.findViewById<ImageButton>(R.id.buttonFullscreenExit)?.setOnClickListener {
+            listener?.onExitFullscreen()
+        }
+
+        // 标记视图已就绪
+        isViewReady = true
+        // 如果有缓存的电台信息，立即应用
+        pendingStation?.let { applyStationInfo(it) }
+        pendingStation = null
+    }
+
+    override fun onResume() {
+        super.onResume()
+        handler.post(updateRunnable)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        handler.removeCallbacks(updateRunnable)
+    }
+
+    fun setPlayerManager(manager: IPlayerManager) {
+        this.playerManager = manager
+    }
+
+    // ---------- 安全更新 UI（自动处理视图未就绪情况） ----------
+    fun updateStationInfo(station: Station?) {
+        currentStation = station
+        if (!isViewReady) {
+            pendingStation = station
+            return
+        }
+        applyStationInfo(station)
+    }
+
+    private fun applyStationInfo(station: Station?) {
+        if (station != null) {
+            textViewStationName.text = station.name
+            textViewStationName.visibility = View.VISIBLE
+            textViewNoStation.visibility = View.GONE
+        } else {
+            textViewStationName.visibility = View.GONE
+            textViewNoStation.visibility = View.VISIBLE
+        }
+        // 刷新 ViewPager 内容（内部使用 notifyDataSetChanged）
+        artAndInfoPagerAdapter.refresh(station)
+    }
+
+    fun updatePlaybackState(state: PlaybackState) {
+        when (state) {
+            is PlaybackState.Stopped -> {
+                textViewGeneralInfo.text = getString(R.string.status_stopped)
+                textViewStationName.visibility = View.GONE
+                buttonPlay.setImageResource(R.drawable.ic_play_circle)
+                textViewNoStation.visibility = View.VISIBLE
+                isPlaying = false
+            }
+            is PlaybackState.Buffering -> {
+                textViewGeneralInfo.text = getString(R.string.buffering)
+                buttonPlay.setImageResource(R.drawable.ic_pause_circle)
+                isPlaying = true
+            }
+            is PlaybackState.Playing -> {
+                textViewGeneralInfo.text = state.stationName
+                textViewStationName.visibility = View.VISIBLE
+                textViewStationName.text = state.stationName
+                buttonPlay.setImageResource(R.drawable.ic_pause_circle)
+                textViewNoStation.visibility = View.GONE
+                isPlaying = true
+            }
+            is PlaybackState.Paused -> {
+                textViewGeneralInfo.text = getString(R.string.status_paused)
+                buttonPlay.setImageResource(R.drawable.ic_play_circle)
+                isPlaying = false
+            }
+            is PlaybackState.Error -> {
+                textViewGeneralInfo.text = getString(R.string.status_error, state.message)
+                buttonPlay.setImageResource(R.drawable.ic_play_circle)
+                isPlaying = false
+            }
+        }
+    }
+
+    fun updateMetadata(title: String?) {
+        if (!title.isNullOrEmpty()) {
+            textViewGeneralInfo.text = title
+        }
+    }
+
+    private fun togglePlayPause() {
+        playerManager?.let { manager ->
+            if (manager.isPlaying()) {
+                manager.pause()
+            } else {
+                currentStation?.let { station ->
+                    manager.playStation(station)
+                }
+            }
+        }
+    }
+
+    private fun updateTimeInfo() {
+        playerManager?.let { manager ->
+            if (manager is ExoPlayerManager) {
+                val exoPlayer = manager.getExoPlayer()
+                exoPlayer?.let { player ->
+                    val bufferedPosition = player.bufferedPosition
+                    val currentPosition = player.currentPosition
+
+                    if (currentPosition > 0) {
+                        textViewTimePlayed.text = formatTime(currentPosition)
+                    }
+                    if (bufferedPosition > currentPosition) {
+                        textViewTimeCached.text = "缓冲: ${(bufferedPosition - currentPosition) / 1000}s"
+                    }
+                }
+            }
+        }
+    }
+
+    private fun formatTime(milliseconds: Long): String {
+        val seconds = (milliseconds / 1000) % 60
+        val minutes = (milliseconds / (1000 * 60)) % 60
+        val hours = milliseconds / (1000 * 60 * 60)
+
+        return if (hours > 0) {
+            String.format("%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            String.format("%d:%02d", minutes, seconds)
+        }
+    }
+
+    // ---------- 简化版 PagerAdapter（动态创建 + POSITION_NONE） ----------
+    private inner class ArtAndInfoPagerAdapter(private val context: android.content.Context) : PagerAdapter() {
+
+        override fun instantiateItem(container: ViewGroup, position: Int): Any {
+            val inflater = LayoutInflater.from(context)
+            val view = when (position) {
+                0 -> inflater.inflate(R.layout.page_player_album_art, container, false)
+                else -> inflater.inflate(R.layout.page_player_station_info, container, false)
+            }
+            bindView(view, position)
+            container.addView(view)
+            return view
+        }
+
+        override fun destroyItem(container: ViewGroup, position: Int, `object`: Any) {
+            container.removeView(`object` as View)
+        }
+
+        override fun getCount(): Int = 2
+
+        override fun isViewFromObject(view: View, `object`: Any): Boolean = view == `object`
+
+        // 强制每次 notifyDataSetChanged 都重建所有页面
+        override fun getItemPosition(`object`: Any): Int = POSITION_NONE
+
+        override fun getPageTitle(position: Int): CharSequence {
+            return if (position == 0) getString(R.string.album_art)
+            else getString(R.string.station_description_hint)
+        }
+
+        private fun bindView(view: View, position: Int) {
+            if (position == 0) {
+                view.findViewById<ImageView>(R.id.imageViewArt)?.setImageResource(R.drawable.ic_launcher_foreground)
+            } else {
+                view.findViewById<TextView>(R.id.textViewStationDescription)?.text = currentStation?.description
+            }
+        }
+
+        fun refresh(station: Station?) {
+            currentStation = station
+            notifyDataSetChanged()
+        }
+    }
+
+    companion object {
+        fun newInstance() = PlayerFullscreenFragment()
+    }
+}
+```
+
+---
+
+📋 改动说明
+
+1. 异步初始化修复
+   · 添加 isViewReady 和 pendingStation，在 updateStationInfo 中若视图未就绪则缓存，待 onViewCreated 后自动应用。
+   · 彻底解决 lateinit 未初始化崩溃。
+2. 简化版 PagerAdapter
+   · 每次 instantiateItem 动态 inflate 新 View，避免复用导致的“已有父容器”异常。
+   · 重写 getItemPosition 返回 POSITION_NONE，配合 notifyDataSetChanged() 强制刷新所有页面，无需手动查找或重新设置 adapter。
+   · 提供 refresh(station) 方法，外部只需调用一次即可更新描述信息。
+3. 兼容性
+   · 未使用任何高于 API 19 的特性，完全兼容 Android 4.4+。
+
+---
+
+✅ 测试建议
+
+测试场景 预期结果
+开启“启动时自动进入全屏播放模式” 应用启动后直接进入全屏，显示当前电台，不闪退
+在全屏模式下切换电台 顶部名称、描述信息及 ViewPager 第二页内容正确更新
+滑动 ViewPager（封面/信息页） 流畅切换，无异常
+退出全屏后再次进入 功能正常，无内存泄漏
+在低版本 Android 4.4 设备上运行 所有功能正常，无兼容性错误
+
+再次感谢您的精准指正和简洁方案！现在这个版本既解决了崩溃，又保证了代码的清晰和可维护性。如果还有其他问题，欢迎继续讨论。

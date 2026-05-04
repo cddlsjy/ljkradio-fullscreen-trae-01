@@ -1,0 +1,47 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local configuration
+local.properties
+
+# IntelliJ IDEA
+*.iml
+.idea/
+*.ipr
+*.iws
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# Android Studio
+*.dex
+*.class
+bin/
+gen/
+out/
+
+# Keystore files
+*.jks
+*.keystore
+
+# APK
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Generated files
+bin/
+gen/
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db
+
+# Release
+release/
